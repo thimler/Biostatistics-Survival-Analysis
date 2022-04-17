@@ -1,0 +1,544 @@
+---
+title: "MATH-493 : Individual report"
+author: "Théo Imler"
+date: "May 2019"
+header-includes:
+- \usepackage{fancyhdr}
+- \pagestyle{fancy}
+- \fancyhead{}
+- \fancyhead[CO,CE]{Imler Théo}
+- \fancyhead[HL]{MATH-493}
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE)
+
+library(gdata)
+library(dplyr)
+library(tableone)
+library(stargazer)
+library(survival)
+library(ggplot2)
+library(ggfortify)
+library(survminer)
+library(reporttools)
+library("coin")
+library("RTCGA.clinical")
+library("tab")
+library(grid)
+library(gtable)
+library("arsenal")
+```
+
+This report has for objective the statistical analysis of the data collected by JR Caplehor and J. Bel for their study published in 1991 in the *Medical Journal of Australia*. This study objective was to compare two methadone treatment clinics for heroin addicts who entered maintenance programmes (between February 1986 and August 1987) to assess patient **time remaining** under methadone treatment, an opioid used for maintenance therapy in opioid dependence.
+
+The dataset is composed of 238 individuals and the following variables :
+
+  -	**Survival** : The time (in **days**) until the patient dropped out of the clinic or was censored
+  -	**Status** : If the patient droppred out of the clinic (code : **1**) or was censored (code : **0**)
+  -	**Clinic** : I which methadone clinic the patient was (**1** for the first, **2** for the second)
+  -	**Prison** : If the patient has a prison record ( Yes : **1**, No : **0**)
+  -	**Dose** : patient maximum methadone dose (**mg/day**)
+
+Note that the two clinics differ from their live-in policies.
+
+Since the variable of interest is here a time to an event the dataset is survival data. In this case, the event is the departure from clinic (drop out). If the patient drops out, the therapy is considered as a failure (negative event). In case where the study ends before the patient drops out we only know that the waiting time exceeds the observation time (censoring) and we can’t model this situation with logistic regression. For the survival analysis methods to be valid, the censoring mechanism must be independent of the survival mechanism. In this study, the total duration was fixed thus it is right censoring (fixed type I), a non-informative mechanism that leads to the same likelihood function.
+
+In this report, the analysis focus on how single parameter affects the survival. Lastly, the hazard function was modelled using Cox regression. Every outputs and results were obtained from **R** software (v.3.5.2).
+
+## Data Investigation
+
+```{r loading, echo=FALSE}
+heroin <- read.table("http://web1.sph.emory.edu/dkleinb/allDatasets/surv2datasets/addicts.dat", skip=19)
+
+colnames(heroin) <- c("ID", "Clinic", "Status", "Survival", "Prison", "Methodone")
+
+heroin <- as.data.frame(heroin)
+heroin <- heroin[,-1]
+
+
+```
+
+```{r columns, include = FALSE}
+# Modify heroin types for each variable in addicts 
+# Clinic is a factor variable, everything else is numeric.
+heroin$Clinic <- as.factor(heroin$Clinic)
+heroin$Status <- as.numeric(heroin$Status)
+heroin$Survival <- as.numeric(heroin$Survival)
+heroin$Prison <- as.numeric(heroin$Prison)
+heroin$Methodone <- as.numeric(heroin$Methodone)
+
+
+heroin$Dosage[heroin$Methodone < 55] <- "Low"
+heroin$Dosage[(heroin$Methodone <= 70) & (heroin$Methodone >=55)] <- "Medium"
+heroin$Dosage[heroin$Methodone > 70] <- "High"
+heroin$Dosage <- ordered(heroin$Dosage, levels = c("Low", "Medium", "High")) # Reorder since it is an ordinal factor
+
+# preparation for latex table
+vars0 <- with(heroin, data.frame("Clinic" = factor(heroin$Clinic, labels = c("Clinic 1", "Clinic 2")), "Methodone" = heroin$Methodone, "Dosage" = heroin$Dosage, "Survival" = heroin$Survival, "Status" =    factor(heroin$Status, levels = 0:1, labels = c("left", "censored")), check.names = FALSE))
+
+vars1 <- vars0[, c("Clinic", "Status", "Dosage")]
+cap1 <- "Patient characteristics: categorical variables."
+tableNominal(vars = vars1, cap = cap1, vertical = FALSE, lab =   "tab: nominal1", longtable = FALSE)
+
+vars2 <- vars0[ ,c("Methodone","Survival")]
+cap4 <- "Patient characteristics: continuous variables"
+
+```
+
+The dataset is consisted of two categorical variables : **Clinic** and **Status**. In order to be able to represent survival curve for the **Methodone** variable, an ordonnored factor *Dosage* was created as follow : 
+
+<center>
+- Methodone $<$ 55 : Dosage = **Low** 
+- 55 $\geq$ Methodone $\leq$ 70  : Dosage = **Medium**
+- Methodone $>$ 70 : Dosage = **High**
+</center>
+
+                        
+As observable on **Table 1** below, the proportion of censored events is high since it represent more than 60% of the sample. It is then not adequate to use regression analysis. 
+
+```{r categorical, results = "asis",message = FALSE, echo = FALSE}
+nominal <- tableNominal(vars = vars1, cap = cap1, vertical = FALSE, lab =   "tab: nominal1", longtable = FALSE,comment = FALSE, cumsum = FALSE)
+
+```
+
+We can observe than the repartion of patients into clinic and administered Methodone dose are not uniformly distributed. Indeed, there is two times more patients in Clinic 1 than in Clinic 2 and half of the patients are under a medium dose of Methodone, the two other regimes are less frequent.
+
+This can be easely visualized on Figure **1**(left panel) and resumed in Table **2**, we can see that the medium dosage is the most used among patient for an average dose of 60.4 g by day.  
+
+```{r histo, echo = FALSE, fig.height= 3.5, fig.cap="\\label{fig:figs} Dosage and Survival distribution"}
+layout(matrix(1:2, nrow = 1))
+hist(x = heroin$Methodone,breaks = 10, col = "lightgray", border = "blue",freq = TRUE,xlab = "Methodone Dose (mg/day)",main = NULL,ylim = c(0,80),cex.axis = 0.85,cex.lab = 0.85)
+segments(x0=55,y0=0,x1=55,y1=75,lty="dotted", col="red", lwd=2)
+segments(x0=70,y0=0,x1=70,y1=75,lty="dotted", col="red", lwd=2)
+text(32.5, 72,  "Low" ,cex=0.8, pos=3,col="red")
+text(63, 72,  "Medium",cex=0.8, pos=3,col="red")
+text(90, 72,  "High",cex=0.8, pos=3,col="red")
+
+hist(x = heroin$Survival, breaks = 20, col = "lightgray", border = "blue",freq = TRUE,xlab = "Survival (day)",main = NULL,cex.axis = 0.85)
+  
+  
+hist(x = subset(heroin$Survival,heroin$Status == 0), breaks = 20, col = "darkslateblue", border = "blue",freq = TRUE,xlab = "Survival (day)", add = TRUE,cex.axis = 0.85)
+
+legend("topright", c("With Censoring", "Without Censoring"), fill=c("lightgray", "darkslateblue"),cex = 0.5)
+
+
+```
+
+```{r continuous,message = FALSE, results = "asis", echo = FALSE}
+continuous <- tableContinuous(vars = vars2, cap = cap4, lab = "tab: cont1",    longtable = FALSE, comment = FALSE, cumsum = FALSE, stats = c("n", "min", "q1", "median", "mean", "q3", "max"))
+```
+
+Logically, the survival decreases with time, but it is not possible to know if the decrease is due to an event or to censoring. In order, to have a better visualization, the survival distribution of patients who experienced an event during the study observation time was plot on the same histogram (blue, no censoring). As observed, the subset distribution is more uniform than the population one, which indicates that a majority of observed events in the population is in fact censoring.
+
+It is now interesting to see how these different factors impact the survivall of patient. 
+
+
+## Survival Function
+
+The **survival probability** is one of the two related probabilities used to decribe survival data with the **hazard probability**. The survival probability, also known as the survivor function $S(t)$, is the probability that an individual survives from the time origin (of the study) to a specific future time $t$. Thus, this function focuses on not having an event. It can be estimated using a non-parametric method from observed survival time : the **Kaplan-Meier** method. It calculated the survival probability at time $t_i$, $S(t_i)$ as follow :
+\[
+  \makebox[\linewidth]{$S(t_i) = S(t_i - 1)(1- d_i/n_i)$}
+\]
+\noindent
+\makebox[\linewidth]{,where : $n_i$ = the number of patients alive just before $t_i$ and $d_i$ = the number of events at $t_i$.}
+
+
+The discrete calculation method used results in a step function. The survival probability can be visualized considering one factor in order to compare survival curves between two groups.
+
+In this section, the survival function was visualized for the Clinic, Prison and Dosage variable. Overall, we want to know which factor have a statistical significant effect on the survival curves. For that we need to test for a significant difference between the curves.
+
+Since the data are censored, the survival distribution comparaison was made using a non-parametric test : the **logrank test**. It compares estimates of the hazard functions of the two groups (three in case of Dosage variable) at each observed time, assuming that the chance of dying for subjects at risk is the same for each group.
+
+Then the test compares the observed number of deaths in each group to the expected number using a $\chi^2$ test. The p-value was indicated on each graph above as the confidence intervall for the survival curve.
+
+```{r survival curves, echo = FALSE}
+model_fit_Clinic <- survfit(Surv(Survival, Status) ~ Clinic, data = heroin)
+
+model_fit_Prison <- survfit(Surv(Survival, Status) ~ Prison, data = heroin)
+
+model_fit_Dosage <- survfit(Surv(Survival, Status) ~ Dosage, data = heroin)
+```
+
+```{r Prison KM, echo = FALSE, fig.height=3.5, fig.cap="\\label{fig:KMdb} Survival curves stratidied by Prison record and Clinic variables"}
+
+#ggsurvplot++
+
+plot1 <- ggsurvplot(
+  model_fit_Prison,       # survfit object with calculated statistics.
+  data = heroin,             # data used to fit survival curves.
+  risk.table = FALSE,       # show risk table.
+  pval = TRUE,             # show p-value of log-rank test.
+  conf.int = TRUE,         # show confidence intervals for 
+  # point estimates of survival curves.
+  palette = c("#E7B800", "#2E9FDF"),
+  xlim = c(0,1000),         # present narrower X axis, but not affect
+  # survival estimates.
+  xlab = "Time in days",   # customize X axis label.
+  break.time.by = 100,     # break X axis in time intervals by 500.
+  ggtheme = theme_light(), # customize plot and risk table with a theme.
+  conf.int.style = "ribbon",
+  conf.int.alpha = 0.2,# customize style of confidence intervals
+  surv.median.line = "hv",# add the median survival pointer.
+  pval.size = 4,
+  legend.title = "Prison record :",
+  legend.labs = c("Without","With"),
+  font.x =  9,
+  font.y = 9,
+  font.legend = 9
+)
+
+plot2 <- ggsurvplot(
+  model_fit_Clinic,       # survfit object with calculated statistics.
+  data = heroin,             # data used to fit survival curves.
+  risk.table = FALSE,       # show risk table.
+  pval = TRUE,             # show p-value of log-rank test.
+  conf.int = TRUE,         # show confidence intervals for 
+  # point estimates of survival curves.
+  palette = c("#199400", "#F00000"),
+  xlim = c(0,1000),         # present narrower X axis, but not affect
+  # survival estimates.
+  xlab = "Time in days",   # customize X axis label.
+  break.time.by = 100,     # break X axis in time intervals by 500.
+  ggtheme = theme_light(), # customize plot and risk table with a theme.
+  conf.int.style = "ribbon",
+  conf.int.alpha = 0.2,# customize style of confidence intervals
+  surv.median.line = "hv",# add the median survival pointer.
+  pval.size = 4,
+  legend.title = "Clinics :",
+  legend.labs = c("Clinic 1","Clinic 2"),
+  font.x =  9,
+  font.y = 9,
+  font.legend = 9
+)
+
+splots <- list()
+splots[[1]] <-plot1
+splots[[2]] <- plot2
+
+arrange_ggsurvplots(splots, print = TRUE,
+  ncol = 2, nrow = 1)
+```
+
+As we can observe on Figure **2** the clinics have a clear impact on the survival rates of Methodone patients (p-value < 0.0001). The patients in Clinic 1 drop out faster than the patients in the clinic 2. After 428 days, 50 % of the patients of Clinic 1 drop out while Clinic 2 will never reach 50% of drop out on the study duration.
+
+Therefore, the live-in policy of Clinic 2 have a real benefit for patients. On the other hand, the possession of a prison record does not impact the drop out rate of patients. As seen on the table **3**, with a p-value of 0.262 the difference is not statistically significative even if the patients with a prison record have a median drop out time shorter than the patients without.
+
+The results above show that the remission times differ in function of the clinic. It is not demonstrated that the difference between clinics is not due to other explanatory variables. 
+
+As an example, to test for the clincis variable significancy without effect of the Prison variable, it is good to compare the two clinics accounting for prison records by stratifying on the variable prison.
+
+\begin{center}
+```{r log_Prison, results = "asis",echo = FALSE}
+summary(tableby(Clinic ~ Surv(Survival, Status),data = heroin, strata = Prison),text = "latex")
+```
+\end{center}
+
+\begin{center}
+Table 3 : Logrank test for Clinic variable stratified by Prison
+\end{center}
+
+
+As we can see on Table **3** above, in both case the remission time is significantly shorter in clinic 1. The patients in clinic 2 have a consistently better prognosis for remaining under treatment that do parients in clinic 1. It is interesting to note that this difference appears to be really small before one year of treatment but diverges after.
+
+Even if the Methodone is a continuous variable it was interessant to visualize its effect with the corresponding survival curve using the Dosage variable.
+As observed on Figure **3** and Table **4** below, the test statistic is highly significant, indicating that these three curves are not equivalent. Patients with high dose of Methadone have a consistently better survival prognosis than patients with medium or low doses. 
+
+```{r Dosage KM,echo = FALSE, fig.height = 3.5 ,fig.cap="\\label{fig:KMmet} Survival curves stratidied by Methodone dosage"}
+
+ggsurvplot(
+  model_fit_Dosage,       # survfit object with calculated statistics.
+  data = heroin,             # data used to fit survival curves.
+  risk.table = FALSE,       # show risk table.
+  pval = TRUE,             # show p-value of log-rank test.
+  conf.int = TRUE,         # show confidence intervals for 
+  # point estimates of survival curves.
+  palette = c("#E7B800", "#2E9FDF","#008000"),
+  xlim = c(0,1000),         # present narrower X axis, but not affect
+  # survival estimates.
+  xlab = "Time in days",   # customize X axis label.
+  break.time.by = 100,     # break X axis in time intervals by 500.
+  ggtheme = theme_light(), # customize plot and risk table with a theme.
+  conf.int.style = "ribbon",
+  conf.int.alpha = 0.2,# customize style of confidence intervals
+  surv.median.line = "hv",# add the median survival pointer.
+  pval.size = 4,
+  legend.title = "Dosage :",
+  legend.labs = c("Low","Medium","High"),
+  font.x =  9,
+  font.y = 9,
+  font.legend = 9
+)
+
+```
+
+The maximum daily dose of methadone dispensed during the study period seems to be a highly significant predictor of retention. Indeed, less than 50% of the patients dropped out clinics after the end of the study (which explains the **NA** value in table **4** against none of the patients under lower dosage.
+
+
+```{r log_Dosage, results = "asis", warning = FALSE, echo = FALSE}
+summary(tableby(Dosage ~ Surv(Survival, Status),data = heroin),title = NULL)
+```
+\begin{center}
+Table 4 : Logrank test for Dosage variable
+\end{center}
+\pagebreak
+Now that we have compared survival curves in specific treatments, it will be interesting to analyze the effect of several risk factors on survival.
+
+
+## Cox Proportional Hazards Models
+
+In survival analysis we often want to assess which time periods have high or low chance of failure among those still at risk at the time. We can characterize these risks using the instantaneous failure rate or hazard function $h(t)$ which describes the probability of an event (its hazard) if the subject survived up to a specific time point $t$. 
+
+Therefore, it measures the instantaneous risk of death (here drop out of the clinic). This hazard function is needed to consider covariates when comparing survival of patients groups.The **hazard function** and **survival function** can be related together : $S(t) = exp(-H(t))$, where $H(t)$ is the hazard function integrated on the time intervall.
+
+As the survival probility, it is not a parametric method, *i.e* it does not assume an underlying probability distribution. Although, it assumes that the hazards of the patient groups compared are constant over time. Thus, it is called a **semi-parametric** method. 
+
+One way to model hazard function is **Cox regression**, it is carried out similarly to regression but with lineraity assumed on the log hazard scale.
+
+Cox proportional hazards models can be interpreted by looking to the **hazard ratios** (HR) which are derived from the model for all covariates included in the model forumla.
+
+As a reminder, the hazard function is modeled as : $h(t) = h_0(t)exp(\beta(x))$, where $h_0(t)$ is the baseline hazard and $exp(\beta(x))$ is the hazard ratio (HR) between two individuals whose values of $x$ differ by one unit when all other covariates are held constant.
+
+An HR represents a relative risk of death that compares one instance of a binary feature to the other instance. $>$ 1 indicates an increased risk of death whereas an HR $<$ 1 indicates a decreased risk. 
+
+
+The Cox regression model used in this report takes every variable in account: **Survival** ~ **Prison** $+$ **Clinic** $+$ **Methodone**. The results are visualized in the table **5** below : 
+
+```{r coxr, echo = FALSE}
+all_model <- coxph(Surv(Survival, Status) ~ Clinic + Prison + Methodone, data = heroin)
+
+heroin_2 <- subset(heroin,select = c("Clinic","Prison","Methodone"))
+
+install.packages("tab")
+library('tab')
+tab <- tabcox(heroin_2,time = heroin$Survival, delta = heroin$Status, latex = FALSE, xlabels = c("Clinic","Prison","Methodone"),p.decimals = 4,suppress.beta = TRUE,bold.colnames = TRUE)
+
+```
+
+
+```{r cox, results = "asis",echo=FALSE,comment = FALSE}
+options(xtable.comment = FALSE)
+xtab <- xtable(tab,caption = "Cox regression results summary")
+
+names(xtab) <- c('Variable','HR','95 CI for HR','P-value' )
+
+
+```
+
+From the outputs of this model we can see that the Methodone dosage and the clinic policy seem to affects positively the patients treatment since the associated HR are $<$ 1 and their p-value significative.
+
+On the other hand, the fact to have a prison record seems to affect treatment efficacity but note that the p-value is not significative. As a first conclusion, we can observe that the model confirms the first assumptions made from the study of the survival curve: the non-significance of prison variable with the efficacity of methadone dosage and clinic live-in-policies. Note that the Clinic appear to be the most important predictor of survival since from the HR we can see that the risk of death is reduced by 64 %..
+
+But in order to return significative results the **proportionnal hazard assumption** must hold. It means that the ratio of the hazards for an option  two individuals is constant over time. Indeed, if the coefficient vary in function of time, the model is irrelevant.
+
+One possible solution to check this assumption is the Schoenfeld residuals test which test independence between residuals and time. It correlates the corresponding set of scaled Schoenfeld residuals with time.
+
+For each covariates, we can plot the scale Schoenfeld residuals against time and the coefficient estimation. The proportionnal hazards assumption is then supported by a non-significant relationship between residuals and time, and refuted by a significant relationship. These residual
+```{r personalized_function, echo = FALSE}
+ggcoxzph_theo <- function (fit, resid = TRUE, se = TRUE, df = 4, nsmo = 40, var,
+                      point.col = "red", point.size = 1, point.shape = 19, point.alpha = 1,
+                      caption = NULL,
+                      ggtheme = theme_survminer(), ...){
+
+  x <- fit
+  if(!methods::is(x, "cox.zph"))
+    stop("Can't handle an object of class ", class(x))
+
+  xx <- x$x
+  yy <- x$y
+  d <- nrow(yy)
+  df <- max(df)
+  nvar <- ncol(yy)
+  pred.x <- seq(from = min(xx), to = max(xx), length = nsmo)
+  temp <- c(pred.x, xx)
+  lmat <- splines::ns(temp, df = df, intercept = TRUE)
+  pmat <- lmat[1:nsmo, ]
+  xmat <- lmat[-(1:nsmo), ]
+  qmat <- qr(xmat)
+  if (qmat$rank < df)
+    stop("Spline fit is singular, try a smaller degrees of freedom")
+  if (se) {
+    bk <- backsolve(qmat$qr[1:df, 1:df], diag(df))
+    xtx <- bk %*% t(bk)
+    seval <- d * ((pmat %*% xtx) * pmat) %*% rep(1, df)
+  }
+  ylab <- paste("Beta(t) for", dimnames(yy)[[2]])
+  if (missing(var))
+    var <- 1:nvar
+  else {
+    if (is.character(var))
+      var <- match(var, dimnames(yy)[[2]])
+    if (any(is.na(var)) || max(var) > nvar || min(var) <
+        1)
+      stop("Invalid variable requested")
+  }
+  if (x$transform == "log") {
+    xx <- exp(xx)
+    pred.x <- exp(pred.x)
+  }
+  else if (x$transform != "identity") {
+    xtime <- as.numeric(dimnames(yy)[[1]])
+    indx <- !duplicated(xx)
+    apr1 <- approx(xx[indx], xtime[indx], seq(min(xx), max(xx),
+                                              length = 17)[2 * (1:8)])
+    temp <- signif(apr1$y, 2)
+    apr2 <- approx(xtime[indx], xx[indx], temp)
+    xaxisval <- apr2$y
+    xaxislab <- rep("", 8)
+    for (i in 1:8) xaxislab[i] <- format(temp[i])
+  }
+  plots <- list()
+  lapply(var, function(i) {
+    invisible(round(x$table[i, 3],4) -> pval)
+    ggplot() + labs(title = paste0('Schoenfeld Individual Test p: ', pval)) + ggtheme -> gplot
+    y <- yy[, i]
+    yhat <- as.vector(pmat %*% qr.coef(qmat, y))
+    if (resid)
+      yr <- range(yhat, y)
+    else yr <- range(yhat)
+    if (se) {
+      temp <- as.vector(2 * sqrt(x$var[i, i] * seval))
+      yup <- yhat + temp
+      ylow <- yhat - temp
+      yr <- range(yr, yup, ylow)
+    }
+    if (x$transform == "identity") {
+      gplot + geom_line(aes(x=pred.x, y=yhat)) +
+        xlab("Time") +
+        ylab(ylab[i]) +
+        ylim(yr) -> gplot
+    } else if (x$transform == "log") {
+      gplot + geom_line(aes(x=log(pred.x), y=yhat)) +
+        xlab("Time") +
+        ylab(ylab[i]) +
+        ylim(yr)  -> gplot
+    } else {
+      gplot + geom_line(aes(x=pred.x, y=yhat)) +
+        xlab("Time") +
+        ylab(ylab[i]) +
+        scale_x_continuous(breaks = xaxisval,
+                           labels = xaxislab) +
+        ylim(yr)-> gplot
+    }
+
+    if (resid)
+      gplot <- gplot + geom_point(aes(x = xx, y =y),
+                                  col = point.col, shape = point.shape, size = point.size, alpha = point.alpha)
+
+    if (se) {
+      gplot <- gplot + geom_line(aes(x=pred.x, y=yup), lty = "dashed") +
+        geom_line(aes( x = pred.x, y = ylow), lty = "dashed")
+    }
+
+    ggpubr::ggpar(gplot, ...)
+
+
+  }) -> plots
+  names(plots) <- var
+  class(plots) <- c("ggcoxzph", "ggsurv", "list")
+
+  if("GLOBAL" %in% rownames(x$table)) # case of multivariate Cox
+    global_p <- NULL
+  else global_p <- NULL # Univariate Cox
+  attr(plots, "global_pval") <- global_p
+  attr(plots, "caption") <- caption
+  plots
+
+}
+
+#' @param x an object of class ggcoxzph
+#' @param newpage open a new page. See \code{\link{grid.arrange}}.
+#' @method print ggcoxzph
+#' @rdname ggcoxzph
+#' @export
+print.ggcoxzph <- function(x, ..., newpage = TRUE){
+  if(!inherits(x, "ggcoxzph"))
+    stop("An object of class ggcoxzph is required.")
+  plots <- x
+  pval <- attr(x, "global_pval")
+  grobs <- widths <- list()
+  for (i in 1:length(plots)) {
+    grobs[[i]] <- ggplotGrob(plots[[i]])
+    widths[[i]] <- grobs[[i]]$widths[2:5]
+  }
+  maxwidth <- do.call(grid::unit.pmax, widths)
+  for (i in 1:length(grobs)) {
+    grobs[[i]]$widths[2:5] <- as.list(maxwidth)
+  }
+
+  if(!is.null(pval)) main <- NULL
+  else main <- NULL
+
+  caption <- attr(plots, "caption")
+
+  do.call(gridExtra::grid.arrange, c(grobs, top = NULL, bottom = NULL, newpage = newpage))
+}
+```
+
+
+```{r assumption,echo = FALSE, fig.height=2.75}
+test<-cox.zph(all_model,global = FALSE)
+rownames(test$table) <- c("Clinics","Prison","Methodone")
+ggcoxzph_theo(test,var = "Prison",font.main = 10, font.x = 10, font.y = 10,font.tickslab = 9) 
+
+```
+```{r plotcli, echo = FALSE, fig.height= 2.75}
+ggcoxzph_theo(test,var = "Clinic2",font.main = 10, font.x = 10, font.y = 10,font.tickslab = 9,ylab = "Beta(t) for Clinics")
+```
+```{r plotmet, echo = FALSE, fig.height= 2.75}
+ggcoxzph_theo(test,var = "Methodone",font.main = 10, font.x = 10, font.y = 10,font.tickslab = 9,ylab = "Beta(t) for Methadone")
+
+```
+\begin{center}
+Figure 4 : Schoenfeld residuals for Prison, Clinics and Methadone variable
+\end{center}
+
+
+First, we can notice the clear "two-band" patterns of Prison and Clinics residuals. This is easely explained by the fact that both variable are two-level factor.
+
+Even if we observe coefficient fluctuations for Methodone and Prison, there is no clear pattern with time, as confirmed by the non-significant p-value. Thus, the proportional hazards appears to be supported for the covariates Methdone and Prison. 
+
+On the other hand, we can observe a clear patern for the clinics variable since the coefficient strongly decreases with time. This observation is clearly confirmed by the Schoenfeld residuals test with a significant p-value. These results are summarized in table **5** below.
+
+Therefore, we have one covariate breaking the assumptions. In order to fix it for future models, we can create an interaction term with clinics and time or we can use stratification. Note that the stratification option is not the best in our case since we would not be able to examine the effect of the stratified variable anymore. 
+
+```{r table3, results = "asis", echo = FALSE}
+z1 = test[[1]]
+xtable(z1, tutle = 'test')
+```
+\begin{center}
+Table 6 : PH assumption testing
+\end{center}
+
+
+How can we assess the fit of our model ? Martingale residuals can be used to check the model fit. When evaluated at the true coefficient value, the expected martingale residual is zero. We can therefore check for systematic deviations from the assumed model by inspecting scatterplots of the martingale residuals. In order to have a good model,  the martingale residuals should be scattered fairly evenly above and below 0, and in addition they should not seem to show any particular pattern.
+
+For clear visualization, we can use the deviance residual which is a normalized transform of the martingale residual. These residuals should be roughtly symmetrically distributed about zero with a standard deviation of 1 :
+
+- Positive values correspond to individuals that “died too soon” compared to expected survival times.
+  
+- Negative values correspond to individual that “lived too long”.
+  
+- Very large or small values are outliers, which are poorly predicted by the model.
+
+
+```{r dev_plot, echo = FALSE}
+
+ggcoxdiagnostics(all_model,type =  "deviance",linear.predictions = FALSE)
+```
+\begin{center}
+Figure 5 : Variance residuals of the model
+\end{center}
+
+From the diagnostic plot above on Figure **5**, we can see that the residuals distribution is roughly symetric as wanted but the distribution deviate from the theoretical line (red) for the last individuals. The model seems to fit well the data for the first observation as already observed previously but it is not robust enough to be choosed. 
+
+
+## Conclusion
+
+The results of this study suggests that the clinic live-in-policies and the opioid agonist (Methadone) dose seems to be the best predictors for a successful treatment.
+
+The individual variable study have confirm these two variables as significant but the regression model was not enough robust and adequate to be chosen.
+
+Indeed, a modified model which would take in account the time dependance of the clinics variable with an interaction term seems to be the best option with our dataset and should be investigated. 
